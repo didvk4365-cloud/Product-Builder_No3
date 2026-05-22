@@ -2662,31 +2662,36 @@
             let localTileRegistry = {};
             let map = null;
 
-            // Register local folder protocol with MapLibre GL
+            // Register local folder protocol with MapLibre GL (MapLibre GL JS v4 expects a Promise returning { data: ArrayBuffer })
             if (typeof maplibregl !== 'undefined') {
-                maplibregl.addProtocol('local-folder-tile', (params, callback) => {
-                    const url = params.url.replace('local-folder-tile://', '');
-                    const blobUrl = localTileRegistry[url];
+                maplibregl.addProtocol('local-folder-tile', async (params, abortController) => {
+                    // Extract z/x/y coordinates using a flexible regex to prevent parser discrepancies
+                    const match = params.url.match(/([0-9]+)\/([0-9]+)\/([0-9]+)/);
+                    if (!match) {
+                        return { data: new ArrayBuffer(0) };
+                    }
+                    const key = `${match[1]}/${match[2]}/${match[3]}`;
+                    const blobUrl = localTileRegistry[key];
                     if (!blobUrl) {
-                        callback(new Error('Tile not found: ' + url));
-                        return { cancel: () => {} };
+                        // Return empty buffer silently for missing tiles (e.g. outside bounds or zoom levels)
+                        return { data: new ArrayBuffer(0) };
                     }
                     
-                    fetch(blobUrl)
-                        .then(res => {
-                            if (!res.ok) throw new Error('Fetch failed');
-                            return res.body.pipeThrough(new DecompressionStream('gzip'));
-                        })
-                        .then(stream => new Response(stream).arrayBuffer())
-                        .then(buffer => {
-                            callback(null, buffer, null, null);
-                        })
-                        .catch(err => {
-                            console.error('Error loading local tile:', err);
-                            callback(err);
-                        });
+                    try {
+                        const res = await fetch(blobUrl, { signal: abortController.signal });
+                        if (!res.ok) throw new Error('Fetch failed');
                         
-                    return { cancel: () => {} };
+                        // Decompress the gzipped vector tile
+                        const decompressedStream = res.body.pipeThrough(new DecompressionStream('gzip'));
+                        const buffer = await new Response(decompressedStream).arrayBuffer();
+                        return { data: buffer };
+                    } catch (err) {
+                        if (err.name === 'AbortError') {
+                            throw err; // propagate abort
+                        }
+                        console.error('Error loading local tile:', err);
+                        return { data: new ArrayBuffer(0) };
+                    }
                 });
             }
 
@@ -5183,23 +5188,34 @@
 
                 for (let i = 0; i < files.length; i++) {
                     const file = files[i];
-                    const path = file.webkitRelativePath;
+                    // webkitRelativePath contains backslashes on some platforms, normalize them
+                    const path = (file.webkitRelativePath || '').replace(/\\/g, '/');
                     if (!path) continue;
 
-                    // z/x/y 경로 패턴 매칭
-                    const match = path.match(/\/([0-9]+)\/([0-9]+)\/([0-9]+)\.(png|pbf)$/);
-                    if (match) {
-                        const z = parseInt(match[1]);
-                        const x = parseInt(match[2]);
-                        const y = parseInt(match[3]);
+                    // Parse z/x/y by splitting path segments (extremely robust against varying root names)
+                    const parts = path.split('/');
+                    if (parts.length >= 3) {
+                        const yExt = parts[parts.length - 1];
+                        const xStr = parts[parts.length - 2];
+                        const zStr = parts[parts.length - 3];
                         
-                        // 레벨 14까지만 제한
-                        if (z <= 14) {
-                            const key = `${z}/${x}/${y}`;
-                            localTileRegistry[key] = URL.createObjectURL(file);
-                            tileCount++;
-                            if (z < minZ) minZ = z;
-                            if (z > maxZ) maxZ = z;
+                        const yMatch = yExt.match(/^([0-9]+)\.(png|pbf)$/i);
+                        const xMatch = xStr.match(/^([0-9]+)$/);
+                        const zMatch = zStr.match(/^([0-9]+)$/);
+                        
+                        if (yMatch && xMatch && zMatch) {
+                            const z = parseInt(zStr);
+                            const x = parseInt(xStr);
+                            const y = parseInt(yMatch[1]);
+                            
+                            // Limit to maxzoom 14
+                            if (z <= 14) {
+                                const key = `${z}/${x}/${y}`;
+                                localTileRegistry[key] = URL.createObjectURL(file);
+                                tileCount++;
+                                if (z < minZ) minZ = z;
+                                if (z > maxZ) maxZ = z;
+                            }
                         }
                     }
                 }
@@ -6518,6 +6534,21 @@
                             pointer-events: none;
                         `;
                         rose.appendChild(tick);
+                    }
+                }
+
+                // 오프라인 지도 이전 연결 기록 리마인더
+                const hasMap = localStorage.getItem('has_offline_map_configured');
+                if (hasMap) {
+                    const statusBox = document.getElementById('map_status_box');
+                    const layerStatus = document.getElementById('map_layer_status');
+                    if (statusBox) {
+                        statusBox.innerHTML = `⚠️ 이전 오프라인 지도 설정이 감지되었습니다. 브라우저 보안 규정상, <strong>설정 탭에서 폴더를 다시 선택</strong>해 주셔야 지도가 작동합니다.`;
+                        statusBox.style.color = 'var(--primary-color)';
+                    }
+                    if (layerStatus) {
+                        layerStatus.innerHTML = `⚠️ 설정 탭에서 오프라인 지도 폴더를 다시 선택해 주셔야 지도가 작동합니다. (새로고침 시 보안 해제)`;
+                        layerStatus.style.color = 'var(--primary-color)';
                     }
                 }
 
