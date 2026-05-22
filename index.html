@@ -2659,7 +2659,7 @@
             updateClock();
 
             // === MapLibre GL JS Offline Map variables & Protocol ===
-            let localTileRegistry = {};
+            let localTileRegistry = new Map();
             let map = null;
 
             // Register local folder protocol with MapLibre GL (MapLibre GL JS v4 expects a Promise returning { data: ArrayBuffer })
@@ -2671,7 +2671,7 @@
                         return { data: new ArrayBuffer(0) };
                     }
                     const key = `${match[1]}/${match[2]}/${match[3]}`;
-                    const file = localTileRegistry[key];
+                    const file = localTileRegistry.get(key);
                     if (!file) {
                         // Return empty buffer silently for missing tiles (e.g. outside bounds or zoom levels)
                         return { data: new ArrayBuffer(0) };
@@ -5174,43 +5174,50 @@
                 const files = event.target.files;
                 if (!files || files.length === 0) return;
 
-                // No Blob URL revocation needed as we store raw File objects directly
-                localTileRegistry = {};
+                // Clear previous registry entries using Map API
+                localTileRegistry.clear();
 
                 let tileCount = 0;
                 let minZ = 99, maxZ = -1;
 
                 for (let i = 0; i < files.length; i++) {
                     const file = files[i];
-                    // webkitRelativePath contains backslashes on some platforms, normalize them
-                    const path = (file.webkitRelativePath || '').replace(/\\/g, '/');
+                    const path = file.webkitRelativePath;
                     if (!path) continue;
 
-                    // Parse z/x/y by splitting path segments (extremely robust against varying root names)
-                    const parts = path.split('/');
-                    if (parts.length >= 3) {
-                        const yExt = parts[parts.length - 1];
-                        const xStr = parts[parts.length - 2];
-                        const zStr = parts[parts.length - 3];
-                        
-                        const yMatch = yExt.match(/^([0-9]+)\.(png|pbf)$/i);
-                        const xMatch = xStr.match(/^([0-9]+)$/);
-                        const zMatch = zStr.match(/^([0-9]+)$/);
-                        
-                        if (yMatch && xMatch && zMatch) {
-                            const z = parseInt(zStr);
-                            const x = parseInt(xStr);
-                            const y = parseInt(yMatch[1]);
-                            
-                            // Limit to maxzoom 14
-                            if (z <= 14) {
-                                const key = `${z}/${x}/${y}`;
-                                localTileRegistry[key] = file; // Direct file mapping (zero CPU/memory overhead!)
-                                tileCount++;
-                                if (z < minZ) minZ = z;
-                                if (z > maxZ) maxZ = z;
-                            }
-                        }
+                    // Extremely high-performance parsing using lastIndexOf & substring
+                    // Normalize to forward slashes only if backslash exists (Windows OS check, near 0ms)
+                    const normPath = path.indexOf('\\') !== -1 ? path.replace(/\\/g, '/') : path;
+
+                    const lastSlash = normPath.lastIndexOf('/');
+                    if (lastSlash === -1) continue;
+                    const secondLastSlash = normPath.lastIndexOf('/', lastSlash - 1);
+                    if (secondLastSlash === -1) continue;
+                    const thirdLastSlash = normPath.lastIndexOf('/', secondLastSlash - 1);
+                    if (thirdLastSlash === -1) continue;
+
+                    const zStr = normPath.substring(thirdLastSlash + 1, secondLastSlash);
+                    const xStr = normPath.substring(secondLastSlash + 1, lastSlash);
+                    const yExt = normPath.substring(lastSlash + 1);
+
+                    const dotIdx = yExt.lastIndexOf('.');
+                    if (dotIdx === -1) continue;
+                    const yStr = yExt.substring(0, dotIdx);
+                    const ext = yExt.substring(dotIdx + 1).toLowerCase();
+
+                    // Only permit vector tile formats (.png / .pbf)
+                    if (ext !== 'png' && ext !== 'pbf') continue;
+
+                    const z = Number(zStr);
+                    const x = Number(xStr);
+                    const y = Number(yStr);
+
+                    if (!isNaN(z) && !isNaN(x) && !isNaN(y) && z <= 14) {
+                        const key = `${z}/${x}/${y}`;
+                        localTileRegistry.set(key, file); // Store raw File handle directly
+                        tileCount++;
+                        if (z < minZ) minZ = z;
+                        if (z > maxZ) maxZ = z;
                     }
                 }
 
@@ -6666,7 +6673,7 @@
                             if (map) {
                                 setTimeout(() => { map.resize(); }, 100);
                             } else {
-                                if (Object.keys(localTileRegistry).length > 0) {
+                                if (localTileRegistry.size > 0) {
                                     initMap();
                                 }
                             }
