@@ -2671,22 +2671,19 @@
                         return { data: new ArrayBuffer(0) };
                     }
                     const key = `${match[1]}/${match[2]}/${match[3]}`;
-                    const blobUrl = localTileRegistry[key];
-                    if (!blobUrl) {
+                    const file = localTileRegistry[key];
+                    if (!file) {
                         // Return empty buffer silently for missing tiles (e.g. outside bounds or zoom levels)
                         return { data: new ArrayBuffer(0) };
                     }
                     
                     try {
-                        const res = await fetch(blobUrl, { signal: abortController.signal });
-                        if (!res.ok) throw new Error('Fetch failed');
-                        
-                        // Decompress the gzipped vector tile
-                        const decompressedStream = res.body.pipeThrough(new DecompressionStream('gzip'));
+                        // Decompress the gzipped local file stream directly (no network, no Blob URL fetch overhead)
+                        const decompressedStream = file.stream().pipeThrough(new DecompressionStream('gzip'));
                         const buffer = await new Response(decompressedStream).arrayBuffer();
                         return { data: buffer };
                     } catch (err) {
-                        if (err.name === 'AbortError') {
+                        if (err && err.name === 'AbortError') {
                             throw err; // propagate abort
                         }
                         console.error('Error loading local tile:', err);
@@ -5177,10 +5174,7 @@
                 const files = event.target.files;
                 if (!files || files.length === 0) return;
 
-                // 기존 Blob URL 해제하여 메모리 누수 방지
-                for (const key in localTileRegistry) {
-                    URL.revokeObjectURL(localTileRegistry[key]);
-                }
+                // No Blob URL revocation needed as we store raw File objects directly
                 localTileRegistry = {};
 
                 let tileCount = 0;
@@ -5211,7 +5205,7 @@
                             // Limit to maxzoom 14
                             if (z <= 14) {
                                 const key = `${z}/${x}/${y}`;
-                                localTileRegistry[key] = URL.createObjectURL(file);
+                                localTileRegistry[key] = file; // Direct file mapping (zero CPU/memory overhead!)
                                 tileCount++;
                                 if (z < minZ) minZ = z;
                                 if (z > maxZ) maxZ = z;
